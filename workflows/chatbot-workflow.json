@@ -1,0 +1,167 @@
+{
+  "name": "Chatbot con Memoria",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "chat",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-1",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "chatbot-webhook"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT u.id AS user_id FROM chatbot_users u WHERE u.external_id = '{{ $json.body.user_id }}' AND u.is_active = TRUE LIMIT 1;",
+        "options": {}
+      },
+      "id": "postgres-user",
+      "name": "Buscar Usuario",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [460, 300],
+      "credentials": {
+        "postgres": {
+          "id": "chatbot-postgres-cred",
+          "name": "Chatbot Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO chatbot_conversations (user_id, title) SELECT {{ $json.user_id }}, '{{ $('Webhook').item.json.body.conversation_title || \"Nueva conversacion\" }}' WHERE NOT EXISTS ( SELECT 1 FROM chatbot_conversations WHERE user_id = {{ $json.user_id }} AND id = {{ $('Webhook').item.json.body.conversation_id || 0 }} AND is_deleted = FALSE ); SELECT id AS conversation_id FROM chatbot_conversations WHERE user_id = {{ $json.user_id }} AND is_deleted = FALSE AND ( id = {{ $('Webhook').item.json.body.conversation_id || 0 }} OR TRUE ) ORDER BY CASE WHEN id = {{ $('Webhook').item.json.body.conversation_id || 0 }} THEN 0 ELSE 1 END, created_at DESC LIMIT 1;",
+        "options": {}
+      },
+      "id": "postgres-conversation",
+      "name": "Obtener Conversacion",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [680, 300],
+      "credentials": {
+        "postgres": {
+          "id": "chatbot-postgres-cred",
+          "name": "Chatbot Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT m.role, m.content FROM chatbot_messages m WHERE m.conversation_id = {{ $json.conversation_id }} ORDER BY m.created_at ASC LIMIT 50;",
+        "options": {}
+      },
+      "id": "postgres-history",
+      "name": "Cargar Historial",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [900, 300],
+      "credentials": {
+        "postgres": {
+          "id": "chatbot-postgres-cred",
+          "name": "Chatbot Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const historyItems = $('Cargar Historial').all();\nconst userMessage = $('Webhook').first().json.body.message;\nconst userId = $('Buscar Usuario').first().json.user_id;\nconst conversationId = $('Obtener Conversacion').first().json.conversation_id;\n\nconst SYSTEM_PROMPT = 'Eres un asistente amable y util. Responde siempre en español. Se conciso pero completo en tus respuestas.';\n\nconst messages = [];\n\nmessages.push({ role: 'system', content: SYSTEM_PROMPT });\n\nfor (const item of historyItems) {\n  messages.push({ role: item.json.role, content: item.json.content });\n}\n\nmessages.push({ role: 'user', content: userMessage });\n\nfunction escapeSql(str) {\n  return str.replace(/'/g, \"''\");\n}\n\nreturn [{\n  json: {\n    messages,\n    user_id: userId,\n    conversation_id: conversationId,\n    user_message: escapeSql(userMessage)\n  }\n}];"
+      },
+      "id": "code-prompt",
+      "name": "Construir Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://ollama:11434/api/chat",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'llama3', messages: $json.messages, stream: false }) }}"
+      },
+      "id": "http-ollama",
+      "name": "Llamar Ollama",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const conversationId = $('Construir Prompt').first().json.conversation_id;\nconst userMessage = $('Construir Prompt').first().json.user_message;\nconst assistantMessage = $('Llamar Ollama').first().json.message.content.replace(/'/g, \"''\");\n\nreturn [{\n  json: {\n    conversationId,\n    userMessage,\n    assistantMessage\n  }\n}];"
+      },
+      "id": "code-prepare-save",
+      "name": "Preparar Guardado",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO chatbot_messages (conversation_id, role, content) VALUES ({{ $json.conversationId }}, 'user', '{{ $json.userMessage }}'); INSERT INTO chatbot_messages (conversation_id, role, content) VALUES ({{ $json.conversationId }}, 'assistant', '{{ $json.assistantMessage }}'); UPDATE chatbot_conversations SET updated_at = NOW() WHERE id = {{ $json.conversationId }};",
+        "options": {}
+      },
+      "id": "postgres-save",
+      "name": "Guardar Mensajes",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1780, 300],
+      "credentials": {
+        "postgres": {
+          "id": "chatbot-postgres-cred",
+          "name": "Chatbot Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ response: $('Llamar Ollama').item.json.message.content, conversation_id: $('Construir Prompt').item.json.conversation_id }) }}"
+      },
+      "id": "respond-webhook",
+      "name": "Responder",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [2000, 300]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [[{ "node": "Buscar Usuario", "type": "main", "index": 0 }]]
+    },
+    "Buscar Usuario": {
+      "main": [[{ "node": "Obtener Conversacion", "type": "main", "index": 0 }]]
+    },
+    "Obtener Conversacion": {
+      "main": [[{ "node": "Cargar Historial", "type": "main", "index": 0 }]]
+    },
+    "Cargar Historial": {
+      "main": [[{ "node": "Construir Prompt", "type": "main", "index": 0 }]]
+    },
+    "Construir Prompt": {
+      "main": [[{ "node": "Llamar Ollama", "type": "main", "index": 0 }]]
+    },
+    "Llamar Ollama": {
+      "main": [[{ "node": "Preparar Guardado", "type": "main", "index": 0 }]]
+    },
+    "Preparar Guardado": {
+      "main": [[{ "node": "Guardar Mensajes", "type": "main", "index": 0 }]]
+    },
+    "Guardar Mensajes": {
+      "main": [[{ "node": "Responder", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [],
+  "pinData": {}
+}

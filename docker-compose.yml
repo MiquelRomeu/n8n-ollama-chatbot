@@ -1,0 +1,140 @@
+version: "3.8"
+
+services:
+  # =============================================
+  # PostgreSQL - Base de datos
+  # =============================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: chatbot-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - chatbot-network
+
+  # =============================================
+  # Ollama - Servidor LLM (auto-descarga llama3)
+  # =============================================
+  ollama:
+    image: ollama/ollama:latest
+    container_name: chatbot-ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_HOST=${OLLAMA_HOST}
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        ollama serve &
+        echo "Esperando a que Ollama arranque..."
+        until ollama list >/dev/null 2>&1; do sleep 2; done
+        echo "Ollama listo!"
+        if ollama list | grep -q "llama3"; then
+          echo "llama3 ya esta descargado."
+        else
+          echo "Descargando llama3 (esto tarda unos minutos la primera vez)..."
+          ollama pull llama3
+          echo "llama3 descargado!"
+        fi
+        wait
+    networks:
+      - chatbot-network
+
+  # =============================================
+  # n8n - Plataforma de automatizacion
+  # =============================================
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: chatbot-n8n
+    restart: unless-stopped
+    environment:
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=${POSTGRES_DB}
+      - DB_POSTGRESDB_USER=${POSTGRES_USER}
+      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
+      - N8N_BASIC_AUTH_ACTIVE=true
+      - N8N_BASIC_AUTH_USER=${N8N_BASIC_AUTH_USER}
+      - N8N_BASIC_AUTH_PASSWORD=${N8N_BASIC_AUTH_PASSWORD}
+      - N8N_HOST=${N8N_HOST}
+      - N8N_PORT=${N8N_PORT}
+      - N8N_PROTOCOL=${N8N_PROTOCOL}
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+    ports:
+      - "5678:5678"
+    volumes:
+      - n8n_data:/home/node/.n8n
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:5678/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - chatbot-network
+
+  # =============================================
+  # n8n-init - Importa el workflow (una vez y para)
+  # =============================================
+  n8n-init:
+    image: n8nio/n8n:latest
+    container_name: chatbot-n8n-init
+    environment:
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=${POSTGRES_DB}
+      - DB_POSTGRESDB_USER=${POSTGRES_USER}
+      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+    volumes:
+      - ./workflows:/workflows:ro
+      - n8n_data:/home/node/.n8n
+    depends_on:
+      n8n:
+        condition: service_healthy
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        if [ ! -f /home/node/.n8n/.workflow-imported ]; then
+          echo "Importando workflow del chatbot..."
+          n8n import:workflow --input=/workflows/chatbot-workflow.json
+          touch /home/node/.n8n/.workflow-imported
+          echo "Workflow importado!"
+        else
+          echo "Workflow ya importado, saltando."
+        fi
+    networks:
+      - chatbot-network
+    restart: "no"
+
+volumes:
+  postgres_data:
+  ollama_data:
+  n8n_data:
+
+networks:
+  chatbot-network:
+    driver: bridge
