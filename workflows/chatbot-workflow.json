@@ -3,6 +3,7 @@
   "nodes": [
     {
       "parameters": {
+        "httpMethod": "POST",
         "path": "chat",
         "responseMode": "responseNode",
         "options": {}
@@ -61,6 +62,8 @@
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
       "position": [900, 300],
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true,
       "credentials": {
         "postgres": {
           "id": "chatbot-postgres-cred",
